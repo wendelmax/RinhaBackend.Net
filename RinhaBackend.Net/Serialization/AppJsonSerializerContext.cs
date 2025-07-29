@@ -5,6 +5,8 @@ using RinhaBackend.Net.Models.Entities;
 using RinhaBackend.Net.Models.Payloads;
 using RinhaBackend.Net.Models.Requests;
 using RinhaBackend.Net.Models.Responses;
+using RinhaBackend.Net.Models.Records;
+using RinhaBackend.Net.Models.Enums;
 
 namespace RinhaBackend.Net.Serialization;
 
@@ -13,6 +15,9 @@ namespace RinhaBackend.Net.Serialization;
 [JsonSerializable(typeof(PaymentPayload))]
 [JsonSerializable(typeof(Payment))]
 [JsonSerializable(typeof(SummaryResponse))]
+[JsonSerializable(typeof(Summary))]
+[JsonSerializable(typeof(SummaryDetail))]
+[JsonSerializable(typeof(ProcessorType))]
 [JsonSourceGenerationOptions(
     GenerationMode = JsonSourceGenerationMode.Default,
     PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase)]

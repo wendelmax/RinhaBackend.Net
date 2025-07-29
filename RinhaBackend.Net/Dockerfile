@@ -19,9 +19,10 @@ RUN dotnet build "./RinhaBackend.Net.csproj" -c $BUILD_CONFIGURATION -o /app/bui
 
 FROM build AS publish
 ARG BUILD_CONFIGURATION=Release
-RUN dotnet publish "./RinhaBackend.Net.csproj" -c $BUILD_CONFIGURATION -o /app/publish /p:UseAppHost=false
+# Publish with optimizations but without AOT to support Dapper
+RUN dotnet publish "./RinhaBackend.Net.csproj" -c $BUILD_CONFIGURATION -o /app/publish /p:PublishTrimmed=true /p:PublishReadyToRun=true
 
 FROM base AS final
 WORKDIR /app
 COPY --from=publish /app/publish .
-ENTRYPOINT ["./RinhaBackend.Net"]
+ENTRYPOINT ["dotnet", "RinhaBackend.Net.dll"]

@@ -5,10 +5,16 @@
         <Nullable>enable</Nullable>
         <ImplicitUsings>enable</ImplicitUsings>
         <InvariantGlobalization>true</InvariantGlobalization>
-        <PublishAot>true</PublishAot>
         <EnableJsonSourceGenerationMetadata>true</EnableJsonSourceGenerationMetadata>
         <UseSystemTextJsonSourceGeneration>true</UseSystemTextJsonSourceGeneration>
         <DockerDefaultTargetOS>Linux</DockerDefaultTargetOS>
+        <!-- Performance optimizations -->
+        <EnableUnsafeBinaryFormatterSerialization>false</EnableUnsafeBinaryFormatterSerialization>
+        <EnableUnsafeUTF7Encoding>false</EnableUnsafeUTF7Encoding>
+        <EventSourceSupport>false</EventSourceSupport>
+        <HttpActivityPropagationSupport>false</HttpActivityPropagationSupport>
+        <MetadataUpdaterSupport>false</MetadataUpdaterSupport>
+        <UseSystemTextJson>true</UseSystemTextJson>
     </PropertyGroup>
 
     <ItemGroup>

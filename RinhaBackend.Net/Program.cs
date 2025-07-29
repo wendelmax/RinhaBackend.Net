@@ -1,63 +1,90 @@
-using System.Data;
-using Microsoft.AspNetCore.Builder;
-using Microsoft.Extensions.DependencyInjection;
-using System.Text.Json.Serialization;
-using Npgsql;
+using RinhaBackend.Net.Infrastructure.Clients;
 using RinhaBackend.Net.Infrastructure.Repositories;
-using RinhaBackend.Net.Models.Payloads;
-using RinhaBackend.Net.Models.Requests;
-using RinhaBackend.Net.Serialization;
+using RinhaBackend.Net.Models.Enums;
 using RinhaBackend.Net.Services;
+using System.Data;
+using Dapper;
+using Npgsql;
+using RinhaBackend.Net.Models.Payloads;
 
-var builder = WebApplication.CreateSlimBuilder(args);
-var configuration = builder.Configuration;
-
-builder.Services.ConfigureHttpJsonOptions(options =>
-{
-    options.SerializerOptions.TypeInfoResolverChain.Insert(0, AppJsonSerializerContext.Default);
-});
-
-builder.Services.AddHttpClient("PaymentProcessorDefault", client =>
-{
-    client.BaseAddress = new Uri(configuration["PaymentProcessorDefault:BaseUrl"] ?? string.Empty);
-});
-
-builder.Services.AddHttpClient("PaymentProcessorFallback", client =>
-{
-    client.BaseAddress = new Uri(configuration["PaymentProcessorFallback:BaseUrl"] ?? string.Empty);
-});
+var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddScoped<IDbConnection>(sp =>
 {
     var connStr = sp.GetRequiredService<IConfiguration>().GetConnectionString("PostgresConnection");
+    var logger = sp.GetRequiredService<ILogger<Program>>();
+    logger.LogInformation("Creating database connection with connection string: {ConnectionString}", connStr);
     return new NpgsqlConnection(connStr);
 });
 
 builder.Services.AddScoped<PaymentRepository>();
 builder.Services.AddScoped<SummaryRepository>();
-builder.Services.AddScoped<SummaryService>();
 builder.Services.AddScoped<ProcessorService>();
+builder.Services.AddScoped<SummaryService>();
+
+builder.Services.AddHttpClient<IPaymentProcessorClient, PaymentProcessor>();
 
 var app = builder.Build();
 
-app.MapGet("/payments-summary", async (string from, string to, SummaryService summaryService) =>
+app.MapGet("/health", () => Results.Ok(new { status = "healthy" }));
+
+app.MapGet("/db-test", (IDbConnection connection, ILogger<Program> logger) =>
 {
-    var result = await summaryService.GetSummaryByRange(from, to);
-    return Results.Ok(result);
+    try
+    {
+        connection.Open();
+        var result = connection.QuerySingle<int>("SELECT 1");
+        connection.Close();
+        return Results.Ok(new { status = "database_connected", result });
+    }
+    catch (Exception ex)
+    {
+        logger.LogError(ex, "Database connection test failed");
+        return Results.Problem($"Database connection failed: {ex.Message}", statusCode: 500);
+    }
 });
 
-app.MapPost("/payments", (PaymentRequest payment, ProcessorService processorService) =>
+app.MapGet("/payments-summary", async (string from, string to, SummaryService summaryService, ILogger<Program> logger) =>
 {
-    var dto = new PaymentPayload
+    try
     {
-        CorrelationId = payment.CorrelationId,
-        Amount = payment.Amount,
-        RequestedAt = DateTime.UtcNow
-    };
+        logger.LogInformation("Processing summary request from {From} to {To}", from, to);
+        var result = await summaryService.GetSummaryByRange(from, to);
+        logger.LogInformation("Summary request completed successfully");
+        
+        var response = new Dictionary<string, object>
+        {
+            ["default"] = result.Processors.TryGetValue(ProcessorType.Default, out var defaultDetail) 
+                ? new { totalAmount = defaultDetail.TotalAmount, totalRequests = defaultDetail.TotalRequests }
+                : new { totalAmount = 0m, totalRequests = 0L },
+            ["fallback"] = result.Processors.TryGetValue(ProcessorType.Fallback, out var fallbackDetail)
+                ? new { totalAmount = fallbackDetail.TotalAmount, totalRequests = fallbackDetail.TotalRequests }
+                : new { totalAmount = 0m, totalRequests = 0L }
+        };
+        
+        return Results.Ok(response);
+    }
+    catch (Exception ex)
+    {
+        logger.LogError(ex, "Error processing summary request from {From} to {To}", from, to);
+        return Results.Problem($"Error retrieving summary: {ex.Message}", statusCode: 500);
+    }
+});
 
-    processorService.Enqueue(dto);
-    
-    return Results.Ok();
+app.MapPost("/payments", (PaymentPayload request, ProcessorService processorService, ILogger<Program> logger) =>
+{
+    try
+    {
+        logger.LogInformation("Processing payment request with correlation ID: {CorrelationId}", request.CorrelationId);
+        processorService.Enqueue(request);
+        logger.LogInformation("Payment request completed successfully");
+        return Results.Ok();
+    }
+    catch (Exception ex)
+    {
+        logger.LogError(ex, "Error processing payment request with correlation ID: {CorrelationId}", request.CorrelationId);
+        return Results.Problem($"Error processing payment: {ex.Message}", statusCode: 500);
+    }
 });
 
 app.Run();

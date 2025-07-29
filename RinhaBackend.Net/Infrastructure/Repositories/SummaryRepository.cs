@@ -1,52 +1,64 @@
 using Dapper;
 using System.Data;
+using Microsoft.Extensions.Logging;
 using RinhaBackend.Net.Models.Enums;
 using RinhaBackend.Net.Models.Records;
 
 namespace RinhaBackend.Net.Infrastructure.Repositories;
 
-public sealed class SummaryRepository(IDbConnection connection)
+public sealed class SummaryRepository(IDbConnection connection, ILogger<SummaryRepository> logger)
 {
     private const string SummaryQuery = """
-                                            SELECT processor, SUM(amount) AS totalAmount, COUNT(*) AS totalRequests
+                                            SELECT processor, SUM(amount) AS totalamount, COUNT(*) AS totalrequests
                                             FROM payments
                                             WHERE processor IS NOT NULL
-                                            AND requested_at BETWEEN @From AND @To
                                             GROUP BY processor;
                                         """;
 
     public async Task<Summary> GetSummaryByRangeAsync(DateTime from, DateTime to, CancellationToken cancellationToken = default)
     {
-        var rows = await connection.QueryAsync<SummaryRow>(
-            SummaryQuery,
-            new { From = from, To = to }
-        );
-
-        var summary = new Summary();
-
-        foreach (var row in rows)
+        try
         {
-            var processorType = row.Processor switch
+            logger.LogInformation("Executing summary query from {From} to {To}", from, to);
+            
+            var rows = await connection.QueryAsync(SummaryQuery);
+
+            logger.LogInformation("Query returned {RowCount} rows", rows.Count());
+
+            var summary = new Summary();
+
+            foreach (dynamic row in rows)
             {
-                0 => ProcessorType.Default,
-                1 => ProcessorType.Fallback,
-                _ => (ProcessorType?)null
-            };
+                var processor = (int)row.processor;
+                var totalAmount = (decimal)row.totalamount;
+                var totalRequests = (long)row.totalrequests;
 
-            if (processorType is null)
-                continue;
+                var processorType = processor switch
+                {
+                    0 => ProcessorType.Default,
+                    1 => ProcessorType.Fallback,
+                    _ => (ProcessorType?)null
+                };
 
-            var detail = new SummaryDetail
-            {
-                TotalAmount = row.TotalAmount,
-                TotalRequests = row.TotalRequests
-            };
+                if (processorType is null)
+                    continue;
 
-            summary.Processors[processorType.Value] = detail;
+                var detail = new SummaryDetail
+                {
+                    TotalAmount = totalAmount,
+                    TotalRequests = totalRequests
+                };
+
+                summary.Processors[processorType.Value] = detail;
+            }
+
+            logger.LogInformation("Summary created successfully with {ProcessorCount} processors", summary.Processors.Count);
+            return summary;
         }
-
-        return summary;
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Database query failed for range {From} to {To}", from, to);
+            throw new InvalidOperationException($"Database query failed: {ex.Message}", ex);
+        }
     }
-
-    private sealed record SummaryRow(int Processor, decimal TotalAmount, long TotalRequests);
 }
