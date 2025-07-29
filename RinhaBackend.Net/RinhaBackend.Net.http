@@ -1,0 +1,27 @@
+@RinhaBackend.Net_HostAddress = http://localhost:5183
+
+### Criar um novo pagamento
+POST {{RinhaBackend.Net_HostAddress}}/payments
+Content-Type: application/json
+
+{
+  "correlationId": "4ff8e2e6-6b77-4a67-baf0-b84cb1360c4c",
+  "amount": 100.00,
+  "requestedAt": "2025-07-29T01:00:00Z",
+  "status": "pending",
+  "processor": 1
+}
+
+###
+
+### Buscar pagamento por ID
+GET {{RinhaBackend.Net_HostAddress}}/payments/4ff8e2e6-6b77-4a67-baf0-b84cb1360c4c
+Accept: application/json
+
+###
+
+### Buscar resumo de pagamentos por período
+GET {{RinhaBackend.Net_HostAddress}}/summary?from=2025-07-28T00:00:00Z&to=2025-07-29T00:00:00Z
+Accept: application/json
+
+###
