@@ -18,6 +18,7 @@ namespace RinhaBackend.Net.Serialization;
 [JsonSerializable(typeof(Summary))]
 [JsonSerializable(typeof(SummaryDetail))]
 [JsonSerializable(typeof(ProcessorType))]
+[JsonSerializable(typeof(ProcessorSummary))]
 [JsonSourceGenerationOptions(
     GenerationMode = JsonSourceGenerationMode.Default,
     PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase)]

@@ -6,8 +6,15 @@ using System.Data;
 using Dapper;
 using Npgsql;
 using RinhaBackend.Net.Models.Payloads;
+using RinhaBackend.Net.Serialization;
+using RinhaBackend.Net.Models.Responses;
 
 var builder = WebApplication.CreateBuilder(args);
+
+builder.Services.ConfigureHttpJsonOptions(options =>
+{
+    options.SerializerOptions.TypeInfoResolverChain.Insert(0, AppJsonSerializerContext.Default);
+});
 
 builder.Services.AddScoped<IDbConnection>(sp =>
 {
@@ -52,15 +59,19 @@ app.MapGet("/payments-summary", async (string from, string to, SummaryService su
         var result = await summaryService.GetSummaryByRange(from, to);
         logger.LogInformation("Summary request completed successfully");
         
-        var response = new Dictionary<string, object>
+        var response = new SummaryResponse();
+        
+        if (result.Processors.TryGetValue(ProcessorType.Default, out var defaultDetail))
         {
-            ["default"] = result.Processors.TryGetValue(ProcessorType.Default, out var defaultDetail) 
-                ? new { totalAmount = defaultDetail.TotalAmount, totalRequests = defaultDetail.TotalRequests }
-                : new { totalAmount = 0m, totalRequests = 0L },
-            ["fallback"] = result.Processors.TryGetValue(ProcessorType.Fallback, out var fallbackDetail)
-                ? new { totalAmount = fallbackDetail.TotalAmount, totalRequests = fallbackDetail.TotalRequests }
-                : new { totalAmount = 0m, totalRequests = 0L }
-        };
+            response.Default.TotalAmount = defaultDetail.TotalAmount;
+            response.Default.TotalRequests = defaultDetail.TotalRequests;
+        }
+        
+        if (result.Processors.TryGetValue(ProcessorType.Fallback, out var fallbackDetail))
+        {
+            response.Fallback.TotalAmount = fallbackDetail.TotalAmount;
+            response.Fallback.TotalRequests = fallbackDetail.TotalRequests;
+        }
         
         return Results.Ok(response);
     }
