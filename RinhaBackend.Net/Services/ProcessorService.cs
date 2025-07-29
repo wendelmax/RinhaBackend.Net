@@ -19,7 +19,7 @@ public class ProcessorService(
     private readonly AtomicBoolean _defaultOk = new(true);
     private readonly AtomicBoolean _fallbackOk = new(true);
     private readonly AtomicCounter _counter = new();
-    private const int MaxConcurrency = 24;
+    private const int MaxConcurrency = 50;
 
     public void Enqueue(PaymentPayload payload) => _channel.Writer.TryWrite(payload);
 
@@ -77,12 +77,12 @@ public class ProcessorService(
                 if (result) return ProcessorType.Default;
 
                 _defaultOk.Value = false;
-                _ = Task.Delay(400).ContinueWith(_ => _defaultOk.Value = true);
+                _ = Task.Delay(100).ContinueWith(_ => _defaultOk.Value = true);
             }
             catch
             {
                 _defaultOk.Value = false;
-                _ = Task.Delay(400).ContinueWith(_ => _defaultOk.Value = true);
+                _ = Task.Delay(100).ContinueWith(_ => _defaultOk.Value = true);
             }
         }
 
@@ -95,12 +95,12 @@ public class ProcessorService(
                 if (result) return ProcessorType.Fallback;
 
                 _fallbackOk.Value = false;
-                _ = Task.Delay(400).ContinueWith(_ => _fallbackOk.Value = true);
+                _ = Task.Delay(100).ContinueWith(_ => _fallbackOk.Value = true);
             }
             catch
             {
                 _fallbackOk.Value = false;
-                _ = Task.Delay(400).ContinueWith(_ => _fallbackOk.Value = true);
+                _ = Task.Delay(100).ContinueWith(_ => _fallbackOk.Value = true);
             }
         }
 
