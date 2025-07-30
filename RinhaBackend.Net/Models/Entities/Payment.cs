@@ -7,7 +7,5 @@ public sealed class Payment
 {
     public Guid CorrelationId { get; set; }
     public decimal Amount { get; set; }
-    public DateTime RequestedAt { get; set; }
-    public PaymentStatus Status { get; set; }
     public ProcessorType Processor { get; set; }
 }

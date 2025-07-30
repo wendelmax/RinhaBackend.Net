@@ -1,19 +1,20 @@
 using Dapper;
 using System.Data;
-using Microsoft.Extensions.Logging;
 using RinhaBackend.Net.Models.Enums;
 using RinhaBackend.Net.Models.Records;
+using RinhaBackend.Net.Models.Responses;
 
 namespace RinhaBackend.Net.Infrastructure.Repositories;
 
 public sealed class SummaryRepository(IDbConnection connection, ILogger<SummaryRepository> logger)
 {
     private const string SummaryQuery = """
-                                            SELECT processor, SUM(amount) AS totalamount, COUNT(*) AS totalrequests
-                                            FROM payments
-                                            WHERE processor IS NOT NULL
-                                            GROUP BY processor;
-                                        """;
+                                        SELECT processor, SUM(amount) AS totalamount, COUNT(*) AS totalrequests
+                                        FROM payments
+                                        WHERE processor IS NOT NULL
+                                        AND createdAt BETWEEN @From AND @To
+                                        GROUP BY processor;
+                                    """;
 
     public async Task<Summary> GetSummaryByRangeAsync(DateTime from, DateTime to, CancellationToken cancellationToken = default)
     {
@@ -21,13 +22,15 @@ public sealed class SummaryRepository(IDbConnection connection, ILogger<SummaryR
         {
             logger.LogInformation("Executing summary query from {From} to {To}", from, to);
             
-            var rows = await connection.QueryAsync(SummaryQuery);
+            var parameters = new { From = from, To = to };
+            var rows = await connection.QueryAsync(SummaryQuery, parameters, commandTimeout: 30);
 
-            logger.LogInformation("Query returned {RowCount} rows", rows.Count());
+            var enumerable = rows as dynamic[] ?? rows.ToArray();
+            logger.LogInformation("Query returned {RowCount} rows", enumerable.Length);
 
             var summary = new Summary();
 
-            foreach (dynamic row in rows)
+            foreach (dynamic row in enumerable)
             {
                 var processor = (int)row.processor;
                 var totalAmount = (decimal)row.totalamount;
@@ -43,7 +46,7 @@ public sealed class SummaryRepository(IDbConnection connection, ILogger<SummaryR
                 if (processorType is null)
                     continue;
 
-                var detail = new SummaryDetail
+                var detail = new ProcessorSummary
                 {
                     TotalAmount = totalAmount,
                     TotalRequests = totalRequests
@@ -61,4 +64,4 @@ public sealed class SummaryRepository(IDbConnection connection, ILogger<SummaryR
             throw new InvalidOperationException($"Database query failed: {ex.Message}", ex);
         }
     }
-}
+} 

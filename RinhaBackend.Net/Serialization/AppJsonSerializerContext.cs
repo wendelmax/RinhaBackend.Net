@@ -14,7 +14,6 @@ namespace RinhaBackend.Net.Serialization;
 [JsonSerializable(typeof(Payment))]
 [JsonSerializable(typeof(SummaryResponse))]
 [JsonSerializable(typeof(Summary))]
-[JsonSerializable(typeof(SummaryDetail))]
 [JsonSerializable(typeof(ProcessorType))]
 [JsonSerializable(typeof(ProcessorSummary))]
 [JsonSourceGenerationOptions(
