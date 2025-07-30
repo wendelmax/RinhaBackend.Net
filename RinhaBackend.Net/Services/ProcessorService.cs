@@ -20,6 +20,8 @@ public class ProcessorService(
     private readonly AtomicBoolean _fallbackOk = new(true);
     private readonly AtomicCounter _counter = new();
     private const int MaxConcurrency = 50;
+    private readonly PaymentProcessor _defaultClient = new PaymentProcessor(httpClientFactory.CreateClient("PaymentProcessorDefault"));
+    private readonly PaymentProcessor _fallbackClient = new PaymentProcessor(httpClientFactory.CreateClient("PaymentProcessorFallback"));
 
     public void Enqueue(PaymentPayload payload) => _channel.Writer.TryWrite(payload);
 
@@ -35,26 +37,22 @@ public class ProcessorService(
                 {
                     _counter.Next();
                     _ = Task.Run(() => ProcessPayload(payload), stoppingToken)
-                        .ContinueWith(_ => _counter.Reset());
+                        .ContinueWith(_ => _counter.Reset(), stoppingToken);
                 }
             }
-
-            await Task.Delay(50, stoppingToken);
         }
     }
 
     private async Task ProcessPayload(PaymentPayload payload)
     {
         var processor = await TryProcessWithResilience(payload);
-
+        
         if (processor is not null)
         {
             var payment = new Payment
             {
                 CorrelationId = payload.CorrelationId,
                 Amount = payload.Amount,
-                RequestedAt = payload.RequestedAt,
-                Status = PaymentStatus.PROCESSED,
                 Processor = processor.Value
             };
 
@@ -72,17 +70,14 @@ public class ProcessorService(
         {
             try
             {
-                var defaultClient = new PaymentProcessor(httpClientFactory.CreateClient("PaymentProcessorDefault"));
-                var result = await defaultClient.ProcessAsync(payload);
+                var result = await _defaultClient.ProcessAsync(payload);
                 if (result) return ProcessorType.Default;
 
                 _defaultOk.Value = false;
-                _ = Task.Delay(100).ContinueWith(_ => _defaultOk.Value = true);
             }
             catch
             {
                 _defaultOk.Value = false;
-                _ = Task.Delay(100).ContinueWith(_ => _defaultOk.Value = true);
             }
         }
 
@@ -90,20 +85,35 @@ public class ProcessorService(
         {
             try
             {
-                var fallbackClient = new PaymentProcessor(httpClientFactory.CreateClient("PaymentProcessorFallback"));
-                var result = await fallbackClient.ProcessAsync(payload);
+                var result = await _fallbackClient.ProcessAsync(payload);
                 if (result) return ProcessorType.Fallback;
 
                 _fallbackOk.Value = false;
-                _ = Task.Delay(100).ContinueWith(_ => _fallbackOk.Value = true);
             }
             catch
             {
                 _fallbackOk.Value = false;
-                _ = Task.Delay(100).ContinueWith(_ => _fallbackOk.Value = true);
             }
         }
 
-        return null;
+        while (true)
+        {
+            var healthDefault = await _defaultClient.HealthCheckAsync();
+            var healthFallback = await _fallbackClient.HealthCheckAsync();
+            
+            if (healthDefault is not null)
+            {
+                _defaultOk.Value = true;
+                return await TryProcessWithResilience(payload);
+            }
+            
+            if (healthFallback is not null)
+            {
+                _fallbackOk.Value = true;
+                return await TryProcessWithResilience(payload);
+            }
+            
+            await Task.Delay(5000);
+        }
     }
-}
+} 

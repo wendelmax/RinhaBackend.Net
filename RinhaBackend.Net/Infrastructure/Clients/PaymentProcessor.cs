@@ -1,5 +1,6 @@
 using RinhaBackend.Net.Models.Payloads;
-using RinhaBackend.Net.Models.Responses;
+using System.Text.Json;
+
 
 namespace RinhaBackend.Net.Infrastructure.Clients;
 
@@ -18,9 +19,14 @@ public class PaymentProcessor : IPaymentProcessorClient
         return response.IsSuccessStatusCode;
     }
 
-    public async Task<bool> HealthCheckAsync(CancellationToken cancellationToken = default)
+    public Task<HealthCheckResponse?> HealthCheckAsync(CancellationToken cancellationToken = default)
     {
-        var response = await _httpClient.GetAsync("/payments/service-health", cancellationToken);
-        return response.IsSuccessStatusCode;
+        return _httpClient.GetFromJsonAsync<HealthCheckResponse>("/payments/service-health", cancellationToken);
     }
+}
+
+public class HealthCheckResponse
+{
+    public bool Failing { get; set; }
+    public int MinResponseTime { get; set; }
 }

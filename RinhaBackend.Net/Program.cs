@@ -59,21 +59,7 @@ app.MapGet("/payments-summary", async (string from, string to, SummaryService su
         var result = await summaryService.GetSummaryByRange(from, to);
         logger.LogInformation("Summary request completed successfully");
         
-        var response = new SummaryResponse();
-        
-        if (result.Processors.TryGetValue(ProcessorType.Default, out var defaultDetail))
-        {
-            response.Default.TotalAmount = defaultDetail.TotalAmount;
-            response.Default.TotalRequests = defaultDetail.TotalRequests;
-        }
-        
-        if (result.Processors.TryGetValue(ProcessorType.Fallback, out var fallbackDetail))
-        {
-            response.Fallback.TotalAmount = fallbackDetail.TotalAmount;
-            response.Fallback.TotalRequests = fallbackDetail.TotalRequests;
-        }
-        
-        return Results.Ok(response);
+        return Results.Ok(result);
     }
     catch (Exception ex)
     {

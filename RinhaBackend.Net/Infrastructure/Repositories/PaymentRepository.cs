@@ -9,8 +9,8 @@ public sealed class PaymentRepository(IDbConnection connection)
     public async Task InsertAsync(Payment payment, CancellationToken cancellationToken = default)
     {
         const string insertQuery = """
-                                       INSERT INTO payments (correlation_id, amount, requested_at, status, processor)
-                                       VALUES (@CorrelationId, @Amount, @RequestedAt, @Status, @Processor);
+                                       INSERT INTO payments (correlationId, amount, processor, createdAt)
+                                       VALUES (@CorrelationId, @Amount, @Processor, CURRENT_TIMESTAMP);
                                    """;
 
         await connection.ExecuteAsync(insertQuery, payment);

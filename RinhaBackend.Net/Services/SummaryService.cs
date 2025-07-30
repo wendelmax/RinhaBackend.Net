@@ -1,6 +1,7 @@
 using System.Globalization;
 using RinhaBackend.Net.Infrastructure.Repositories;
-using RinhaBackend.Net.Models.Records;
+using RinhaBackend.Net.Models.Enums;
+using RinhaBackend.Net.Models.Responses;
 
 namespace RinhaBackend.Net.Services;
 
@@ -16,10 +17,16 @@ public sealed class SummaryService(SummaryRepository summaryRepository)
     
     private static readonly CultureInfo DateCulture = CultureInfo.InvariantCulture;
 
-    public Task<Summary> GetSummaryByRange(string? from, string? to)
+    public Task<SummaryResponse> GetSummaryByRange(string? from, string? to)
     {
         var dateRange = ParseDateRange(from, to);
-        return summaryRepository.GetSummaryByRangeAsync(dateRange.From, dateRange.To);
+        var summary = summaryRepository.GetSummaryByRangeAsync(dateRange.From, dateRange.To).Result;
+
+        return Task.FromResult(new SummaryResponse()
+        {
+            Default = summary.Processors[ProcessorType.Default],
+            Fallback = summary.Processors[ProcessorType.Fallback],
+        });
     }
 
     private static (DateTime From, DateTime To) ParseDateRange(string? from, string? to)
