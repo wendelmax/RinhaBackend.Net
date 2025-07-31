@@ -12,17 +12,19 @@ public sealed class SummaryRepository(IDbConnection connection, ILogger<SummaryR
                                         SELECT processor, SUM(amount) AS totalamount, COUNT(*) AS totalrequests
                                         FROM payments
                                         WHERE processor IS NOT NULL
-                                        AND createdAt BETWEEN @From AND @To
+                                        AND requested_at BETWEEN @From AND @To
                                         GROUP BY processor;
                                     """;
 
-    public async Task<Summary> GetSummaryByRangeAsync(DateTime from, DateTime to, CancellationToken cancellationToken = default)
+    public async Task<Summary> GetSummaryByRangeAsync(DateTimeOffset from, DateTimeOffset to, CancellationToken cancellationToken = default)
     {
         try
         {
             logger.LogInformation("Executing summary query from {From} to {To}", from, to);
-            
-            var parameters = new { From = from, To = to };
+
+            var parameters = new DynamicParameters();
+            parameters.Add("@From", from);
+            parameters.Add("@To", to);
             var rows = await connection.QueryAsync(SummaryQuery, parameters, commandTimeout: 30);
 
             var enumerable = rows as dynamic[] ?? rows.ToArray();
@@ -30,21 +32,13 @@ public sealed class SummaryRepository(IDbConnection connection, ILogger<SummaryR
 
             var summary = new Summary();
 
-            foreach (dynamic row in enumerable)
+            foreach (var row in enumerable)
             {
-                var processor = (int)row.processor;
+                var processor = (ProcessorType)row.processor;
                 var totalAmount = (decimal)row.totalamount;
                 var totalRequests = (long)row.totalrequests;
 
-                var processorType = processor switch
-                {
-                    0 => ProcessorType.Default,
-                    1 => ProcessorType.Fallback,
-                    _ => (ProcessorType?)null
-                };
-
-                if (processorType is null)
-                    continue;
+                logger.LogInformation("ProcessorXPTO {Processor}", processor);
 
                 var detail = new ProcessorSummary
                 {
@@ -52,7 +46,7 @@ public sealed class SummaryRepository(IDbConnection connection, ILogger<SummaryR
                     TotalRequests = totalRequests
                 };
 
-                summary.Processors[processorType.Value] = detail;
+                summary.Processors[processor] = detail;
             }
 
             logger.LogInformation("Summary created successfully with {ProcessorCount} processors", summary.Processors.Count);

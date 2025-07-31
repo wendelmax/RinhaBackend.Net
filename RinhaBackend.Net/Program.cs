@@ -1,13 +1,12 @@
 using RinhaBackend.Net.Infrastructure.Clients;
 using RinhaBackend.Net.Infrastructure.Repositories;
-using RinhaBackend.Net.Models.Enums;
 using RinhaBackend.Net.Services;
 using System.Data;
 using Dapper;
 using Npgsql;
+using RinhaBackend.Net.Models.Enums;
 using RinhaBackend.Net.Models.Payloads;
 using RinhaBackend.Net.Serialization;
-using RinhaBackend.Net.Models.Responses;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -20,14 +19,30 @@ builder.Services.AddScoped<IDbConnection>(sp =>
 {
     var connStr = sp.GetRequiredService<IConfiguration>().GetConnectionString("PostgresConnection");
     var logger = sp.GetRequiredService<ILogger<Program>>();
-    logger.LogInformation("Creating database connection with connection string: {ConnectionString}", connStr);
+    logger.LogInformation("Creating database connection factory");
+    
     return new NpgsqlConnection(connStr);
 });
 
 builder.Services.AddScoped<PaymentRepository>();
 builder.Services.AddScoped<SummaryRepository>();
-builder.Services.AddScoped<ProcessorService>();
 builder.Services.AddScoped<SummaryService>();
+builder.Services.AddSingleton<IPaymentQueueService, PaymentQueueService>();
+builder.Services.AddHostedService<PaymentProcessorWorker>();
+
+builder.Services.AddHttpClient("PaymentProcessorDefault", client =>
+{
+    var baseUrl = builder.Configuration["PaymentProcessorDefault:BaseUrl"] ?? "http://payment-processor-default:8080";
+    client.BaseAddress = new Uri(baseUrl);
+    client.Timeout = TimeSpan.FromSeconds(30);
+});
+
+builder.Services.AddHttpClient("PaymentProcessorFallback", client =>
+{
+    var baseUrl = builder.Configuration["PaymentProcessorFallback:BaseUrl"] ?? "http://payment-processor-fallback:8080";
+    client.BaseAddress = new Uri(baseUrl);
+    client.Timeout = TimeSpan.FromSeconds(30);
+});
 
 builder.Services.AddHttpClient<IPaymentProcessorClient, PaymentProcessor>();
 
@@ -35,29 +50,13 @@ var app = builder.Build();
 
 app.MapGet("/health", () => Results.Ok(new { status = "healthy" }));
 
-app.MapGet("/db-test", (IDbConnection connection, ILogger<Program> logger) =>
+app.MapGet("/payments-summary", async (DateTimeOffset from, DateTimeOffset to, IServiceProvider serviceProvider, ILogger<Program> logger) =>
 {
     try
     {
-        connection.Open();
-        var result = connection.QuerySingle<int>("SELECT 1");
-        connection.Close();
-        return Results.Ok(new { status = "database_connected", result });
-    }
-    catch (Exception ex)
-    {
-        logger.LogError(ex, "Database connection test failed");
-        return Results.Problem($"Database connection failed: {ex.Message}", statusCode: 500);
-    }
-});
-
-app.MapGet("/payments-summary", async (string from, string to, SummaryService summaryService, ILogger<Program> logger) =>
-{
-    try
-    {
-        logger.LogInformation("Processing summary request from {From} to {To}", from, to);
+        using var scope = serviceProvider.CreateScope();
+        var summaryService = scope.ServiceProvider.GetRequiredService<SummaryService>();
         var result = await summaryService.GetSummaryByRange(from, to);
-        logger.LogInformation("Summary request completed successfully");
         
         return Results.Ok(result);
     }
@@ -68,13 +67,39 @@ app.MapGet("/payments-summary", async (string from, string to, SummaryService su
     }
 });
 
-app.MapPost("/payments", (PaymentPayload request, ProcessorService processorService, ILogger<Program> logger) =>
+app.MapPost("/payments-test-datetime", async (PaymentPayload request, IServiceProvider serviceProvider, ILogger<Program> logger) =>
 {
     try
     {
-        logger.LogInformation("Processing payment request with correlation ID: {CorrelationId}", request.CorrelationId);
-        processorService.Enqueue(request);
-        logger.LogInformation("Payment request completed successfully");
+        using var scope = serviceProvider.CreateScope();
+        var repository = scope.ServiceProvider.GetRequiredService<PaymentRepository>();
+        
+        logger.LogInformation("Testing DateTime conversion for payment {CorrelationId} with requestedAt {RequestedAt}", 
+            request.CorrelationId, request.RequestedAt);
+        
+        var result = await repository.InsertAsync(request, ProcessorType.Default);
+        
+        return Results.Ok(new { 
+            success = result, 
+            correlationId = request.CorrelationId,
+            requestedAt = request.RequestedAt,
+            requestedAtUtc = request.RequestedAt.UtcDateTime,
+            isValid = request.IsValidRequestedAt
+        });
+    }
+    catch (Exception ex)
+    {
+        logger.LogError(ex, "Error testing DateTime conversion for {CorrelationId}", request.CorrelationId);
+        return Results.Problem($"Error testing DateTime conversion: {ex.Message}", statusCode: 500);
+    }
+});
+
+app.MapPost("/payments", (PaymentPayload request, IPaymentQueueService queueService, ILogger<Program> logger) =>
+{
+    try
+    {
+        queueService.Enqueue(request);
+        logger.LogInformation("Payment enqueued for processing: {CorrelationId} e amount {Amount}", request.CorrelationId, request.Amount);
         return Results.Ok();
     }
     catch (Exception ex)
@@ -84,4 +109,5 @@ app.MapPost("/payments", (PaymentPayload request, ProcessorService processorServ
     }
 });
 
-app.Run();
+
+app.Run(); 
