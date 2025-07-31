@@ -7,51 +7,16 @@ namespace RinhaBackend.Net.Services;
 
 public sealed class SummaryService(SummaryRepository summaryRepository)
 {
-    private static readonly string[] DateFormats = 
+    public Task<SummaryResponse> GetSummaryByRange(DateTimeOffset from, DateTimeOffset to)
     {
-        "yyyy-MM-dd'T'HH:mm:ss.fffK",
-        "yyyy-MM-dd'T'HH:mm:ssK",
-        "yyyy-MM-dd'T'HH:mm:ss",
-        "yyyy-MM-dd"
-    };
-    
-    private static readonly CultureInfo DateCulture = CultureInfo.InvariantCulture;
+        var summary = summaryRepository.GetSummaryByRangeAsync(from, to).Result;
 
-    public Task<SummaryResponse> GetSummaryByRange(string? from, string? to)
-    {
-        var dateRange = ParseDateRange(from, to);
-        var summary = summaryRepository.GetSummaryByRangeAsync(dateRange.From, dateRange.To).Result;
-
+        if(summary.Processors.Count==0) return Task.FromResult(new SummaryResponse());
+        
         return Task.FromResult(new SummaryResponse()
         {
             Default = summary.Processors[ProcessorType.Default],
             Fallback = summary.Processors[ProcessorType.Fallback],
         });
-    }
-
-    private static (DateTime From, DateTime To) ParseDateRange(string? from, string? to)
-    {
-        try
-        {
-            DateTime fromDate = TryParseOrDefault(from, DateTime.UnixEpoch);
-            DateTime toDate = TryParseOrDefault(to, DateTime.UtcNow);
-
-            return (fromDate, toDate);
-        }
-        catch (FormatException ex)
-        {
-            throw new BadHttpRequestException($"Invalid date format: {ex.Message}");
-        }
-    }
-
-    private static DateTime TryParseOrDefault(string? dateText, DateTime defaultValue)
-    {
-        if (string.IsNullOrWhiteSpace(dateText))
-            return defaultValue;
-
-        if (DateTime.TryParseExact(dateText, DateFormats, DateCulture, DateTimeStyles.AdjustToUniversal, out var result))
-            return result;
-
-        throw new FormatException($"String '{dateText}' was not recognized as a valid DateTime.");
     }
 }

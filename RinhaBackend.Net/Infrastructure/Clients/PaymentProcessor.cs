@@ -4,24 +4,19 @@ using System.Text.Json;
 
 namespace RinhaBackend.Net.Infrastructure.Clients;
 
-public class PaymentProcessor : IPaymentProcessorClient
+public class PaymentProcessor(HttpClient httpClient) : IPaymentProcessorClient
 {
-    private readonly HttpClient _httpClient;
-
-    public PaymentProcessor(HttpClient httpClient)
-    {
-        _httpClient = httpClient;
-    }
-
+    ILogger<PaymentProcessor> logger = new LoggerFactory().CreateLogger<PaymentProcessor>();
     public async Task<bool> ProcessAsync(PaymentPayload payload, CancellationToken cancellationToken = default)
     {
-        var response = await _httpClient.PostAsJsonAsync("/payments", payload, cancellationToken);
+        var response = await httpClient.PostAsJsonAsync("/payments", payload, cancellationToken);
+        logger.LogInformation(response.ToString());
         return response.IsSuccessStatusCode;
     }
 
     public Task<HealthCheckResponse?> HealthCheckAsync(CancellationToken cancellationToken = default)
     {
-        return _httpClient.GetFromJsonAsync<HealthCheckResponse>("/payments/service-health", cancellationToken);
+        return httpClient.GetFromJsonAsync<HealthCheckResponse>("/payments/service-health", cancellationToken);
     }
 }
 
