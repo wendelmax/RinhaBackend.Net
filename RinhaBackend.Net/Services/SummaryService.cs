@@ -7,16 +7,28 @@ namespace RinhaBackend.Net.Services;
 
 public sealed class SummaryService(SummaryRepository summaryRepository)
 {
-    public Task<SummaryResponse> GetSummaryByRange(DateTimeOffset from, DateTimeOffset to)
+    public Task<SummaryResponse> GetSummaryByRange(DateTimeOffset? from = null, DateTimeOffset? to = null)
     {
         var summary = summaryRepository.GetSummaryByRangeAsync(from, to).Result;
 
-        if(summary.Processors.Count==0) return Task.FromResult(new SummaryResponse());
-        
-        return Task.FromResult(new SummaryResponse()
+        if(summary.Processors.Count==0) 
         {
-            Default = summary.Processors[ProcessorType.Default],
-            Fallback = summary.Processors[ProcessorType.Fallback],
-        });
+            var emptyResult = new SummaryResponse();
+            return Task.FromResult(emptyResult);
+        }
+        
+        var result = new SummaryResponse();
+        
+        if (summary.Processors.TryGetValue(ProcessorType.Default, out var defaultProcessor))
+        {
+            result.Default = defaultProcessor;
+        }
+        
+        if (summary.Processors.TryGetValue(ProcessorType.Fallback, out var fallbackProcessor))
+        {
+            result.Fallback = fallbackProcessor;
+        }
+        
+        return Task.FromResult(result);
     }
 }

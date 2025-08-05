@@ -1,4 +1,5 @@
 using System.Threading.Channels;
+using Microsoft.Extensions.Hosting;
 using RinhaBackend.Net.Helper;
 using RinhaBackend.Net.Infrastructure.Clients;
 using RinhaBackend.Net.Infrastructure.Repositories;
@@ -21,16 +22,24 @@ public class PaymentProcessorWorker(
         SingleWriter = false
     });
     
-    private readonly SemaphoreSlim _semaphore = new(Environment.ProcessorCount * 4);
+    private readonly SemaphoreSlim _semaphore = new(Environment.ProcessorCount * 2);
     
     private readonly AtomicBoolean _defaultOk = new(true);
     private readonly AtomicBoolean _fallbackOk = new(true);
     private readonly AtomicCounter _defaultFailures = new();
     private readonly AtomicCounter _fallbackFailures = new();
     
-    private const int MaxFailures = 3;
-    private const int BaseDelayMs = 5;
-    private const int MaxDelayMs = 100;
+    // Health check rate limiting - 5 seconds between calls
+    private readonly AtomicBoolean _defaultHealthCheckAvailable = new(true);
+    private readonly AtomicBoolean _fallbackHealthCheckAvailable = new(true);
+    private DateTime _lastDefaultHealthCheck = DateTime.MinValue;
+    private DateTime _lastFallbackHealthCheck = DateTime.MinValue;
+    private readonly object _healthCheckLock = new();
+    
+    private const int MaxFailures = 5;
+    private const int BaseDelayMs = 100;
+    private const int MaxDelayMs = 2000;
+    private const int HealthCheckCooldownMs = 5000; // 5 seconds
     
     private readonly PaymentProcessor _defaultClient = new(httpClientFactory.CreateClient("PaymentProcessorDefault"));
     private readonly PaymentProcessor _fallbackClient = new(httpClientFactory.CreateClient("PaymentProcessorFallback"));
@@ -123,6 +132,16 @@ public class PaymentProcessorWorker(
         try
         {
             logger.LogInformation("Processing payment {CorrelationId} with amount {Amount}", payload.CorrelationId, payload.Amount);
+            
+            // Check if payment was already processed in database
+            using var checkScope = serviceProvider.CreateScope();
+            var checkRepository = checkScope.ServiceProvider.GetRequiredService<PaymentRepository>();
+            var existingPayment = await checkRepository.GetByCorrelationIdAsync(payload.CorrelationId);
+            if (existingPayment is not null)
+            {
+                logger.LogInformation("Payment {CorrelationId} was already processed, skipping", payload.CorrelationId);
+                return;
+            }
             
             var processor = await TryProcessWithResilience(payload, cancellationToken);
             logger.LogDebug("Processor result for {CorrelationId}: {Processor}", payload.CorrelationId, processor);
@@ -280,18 +299,19 @@ public class PaymentProcessorWorker(
         string processorName, 
         CancellationToken cancellationToken)
     {
-        okFlag.Value = false;
         failureCounter.Next();
-
-        logger.LogWarning("{Processor} processor marked as unhealthy (failures: {Failures})", 
-            processorName, failureCounter.Current);
+        logger.LogWarning("{Processor} processor failure (failures: {Failures}/{MaxFailures})", 
+            processorName, failureCounter.Current, MaxFailures);
 
         if (failureCounter.Current >= MaxFailures)
         {
-            var healthCheck = await client.HealthCheckAsync();
-            var recoveryDelay = healthCheck?.MinResponseTime ?? BaseDelayMs;
+            okFlag.Value = false;
+            logger.LogWarning("{Processor} processor marked as unhealthy", processorName);
             
-            logger.LogInformation("{Processor} processor will be retried in {Delay}ms", 
+            // Use fixed recovery delay instead of health check to avoid blacklist
+            var recoveryDelay = MaxDelayMs * 2; // 4 seconds
+            
+            logger.LogInformation("{Processor} processor will be retried in {Delay}ms (avoiding health check)", 
                 processorName, recoveryDelay);
 
             _ = Task.Run(async () =>
@@ -304,7 +324,8 @@ public class PaymentProcessorWorker(
         }
         else
         {
-            var delay = Math.Min(BaseDelayMs * failureCounter.Current, MaxDelayMs);
+            // Exponential backoff for transient failures
+            var delay = Math.Min(BaseDelayMs * (int)Math.Pow(2, failureCounter.Current - 1), MaxDelayMs);
             _ = Task.Run(async () =>
             {
                 await Task.Delay(delay, cancellationToken);
@@ -320,33 +341,82 @@ public class PaymentProcessorWorker(
         
         while (!_defaultOk.Value && !_fallbackOk.Value && !cancellationToken.IsCancellationRequested)
         {
-            await Task.Delay(0, cancellationToken);
+            await Task.Delay(HealthCheckCooldownMs, cancellationToken);
             
             try
             {
-                var defaultHealth = await _defaultClient.HealthCheckAsync();
-                var fallbackHealth = await _fallbackClient.HealthCheckAsync();
-
-                if (defaultHealth is not null)
+                // Check if we can perform health checks (respecting 5-second cooldown)
+                lock (_healthCheckLock)
                 {
-                    _defaultOk.Value = true;
-                    _defaultFailures.Reset();
-                    logger.LogInformation("Default processor recovered");
-                    break;
-                }
-
-                if (fallbackHealth is not null)
-                {
-                    _fallbackOk.Value = true;
-                    _fallbackFailures.Reset();
-                    logger.LogInformation("Fallback processor recovered");
-                    break;
+                    var now = DateTime.UtcNow;
+                    
+                    if (_defaultHealthCheckAvailable.Value && 
+                        (now - _lastDefaultHealthCheck).TotalMilliseconds >= HealthCheckCooldownMs)
+                    {
+                        _defaultHealthCheckAvailable.Value = false;
+                        _lastDefaultHealthCheck = now;
+                        
+                        _ = Task.Run(async () =>
+                        {
+                            try
+                            {
+                                var defaultHealth = await _defaultClient.HealthCheckAsync();
+                                if (defaultHealth is not null)
+                                {
+                                    _defaultOk.Value = true;
+                                    _defaultFailures.Reset();
+                                    logger.LogInformation("Default processor recovered via health check");
+                                }
+                            }
+                            catch (Exception ex)
+                            {
+                                logger.LogDebug(ex, "Default health check failed during recovery wait");
+                            }
+                            finally
+                            {
+                                await Task.Delay(HealthCheckCooldownMs, cancellationToken);
+                                _defaultHealthCheckAvailable.Value = true;
+                            }
+                        }, cancellationToken);
+                    }
+                    
+                    if (_fallbackHealthCheckAvailable.Value && 
+                        (now - _lastFallbackHealthCheck).TotalMilliseconds >= HealthCheckCooldownMs)
+                    {
+                        _fallbackHealthCheckAvailable.Value = false;
+                        _lastFallbackHealthCheck = now;
+                        
+                        _ = Task.Run(async () =>
+                        {
+                            try
+                            {
+                                var fallbackHealth = await _fallbackClient.HealthCheckAsync();
+                                if (fallbackHealth is not null)
+                                {
+                                    _fallbackOk.Value = true;
+                                    _fallbackFailures.Reset();
+                                    logger.LogInformation("Fallback processor recovered via health check");
+                                }
+                            }
+                            catch (Exception ex)
+                            {
+                                logger.LogDebug(ex, "Fallback health check failed during recovery wait");
+                            }
+                            finally
+                            {
+                                await Task.Delay(HealthCheckCooldownMs, cancellationToken);
+                                _fallbackHealthCheckAvailable.Value = true;
+                            }
+                        }, cancellationToken);
+                    }
                 }
             }
             catch (Exception ex)
             {
-                logger.LogDebug(ex, "Health check failed during recovery wait");
+                logger.LogDebug(ex, "Health check coordination failed during recovery wait");
             }
         }
     }
+    
+
 } 

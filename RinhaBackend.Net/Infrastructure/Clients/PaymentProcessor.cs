@@ -9,8 +9,17 @@ public class PaymentProcessor(HttpClient httpClient) : IPaymentProcessorClient
     ILogger<PaymentProcessor> logger = new LoggerFactory().CreateLogger<PaymentProcessor>();
     public async Task<bool> ProcessAsync(PaymentPayload payload, CancellationToken cancellationToken = default)
     {
-        var response = await httpClient.PostAsJsonAsync("/payments", payload, cancellationToken);
-        logger.LogInformation(response.ToString());
+        // Create a new payload with EffectiveRequestedAt instead of nullable RequestedAt
+        var requestPayload = new
+        {
+            correlationId = payload.CorrelationId,
+            amount = payload.Amount,
+            requestedAt = payload.EffectiveRequestedAt
+        };
+        
+        var response = await httpClient.PostAsJsonAsync("/payments", requestPayload, cancellationToken);
+        logger.LogInformation("Payment processor response: {StatusCode} for {CorrelationId}", 
+            response.StatusCode, payload.CorrelationId);
         return response.IsSuccessStatusCode;
     }
 

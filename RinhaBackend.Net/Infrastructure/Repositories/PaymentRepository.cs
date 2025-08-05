@@ -2,6 +2,7 @@ using Dapper;
 using System.Data;
 using RinhaBackend.Net.Models.Enums;
 using RinhaBackend.Net.Models.Payloads;
+using RinhaBackend.Net.Models.Records;
 
 namespace RinhaBackend.Net.Infrastructure.Repositories;
 
@@ -11,18 +12,13 @@ public sealed class PaymentRepository(IDbConnection connection)
     
     public async Task<bool> InsertAsync(PaymentPayload payment, ProcessorType processor)
     {
-        if (!payment.IsValidRequestedAt)
-        {
-            _logger.LogWarning("Invalid RequestedAt for payment {CorrelationId}, using current UTC time", payment.CorrelationId);
-        }
-        
         const string insertQuery = """
             INSERT INTO payments (correlation_id, amount, processor, requested_at)
             VALUES (@CorrelationId, @Amount, @Processor, @RequestedAt)
             ON CONFLICT (correlation_id) DO NOTHING;
         """;
 
-        var utcDateTime = payment.IsValidRequestedAt ? payment.RequestedAt.UtcDateTime : DateTime.UtcNow;
+        var utcDateTime = payment.EffectiveRequestedAt.UtcDateTime;
         
         var parameters = new DynamicParameters();
         parameters.Add("@CorrelationId", payment.CorrelationId);
@@ -31,7 +27,7 @@ public sealed class PaymentRepository(IDbConnection connection)
         parameters.Add("@RequestedAt", utcDateTime);
         
         _logger.LogInformation("Attempting to insert payment {CorrelationId} with processor {Processor} and requestedAt {RequestedAt} (UTC: {UtcDateTime})", 
-            payment.CorrelationId, processor, payment.RequestedAt, utcDateTime);
+            payment.CorrelationId, processor, payment.EffectiveRequestedAt, utcDateTime);
         
         try
         {
@@ -63,4 +59,33 @@ public sealed class PaymentRepository(IDbConnection connection)
             throw;
         }
     }
+    
+    public async Task<PaymentRecord?> GetByCorrelationIdAsync(Guid correlationId)
+    {
+        const string selectQuery = """
+            SELECT correlation_id, amount, processor, requested_at
+            FROM payments
+            WHERE correlation_id = @CorrelationId;
+        """;
+        
+        var parameters = new DynamicParameters();
+        parameters.Add("@CorrelationId", correlationId);
+        
+        try
+        {
+            if (connection.State != ConnectionState.Open)
+            {
+                connection.Open();
+            }
+            
+            var result = await connection.QueryFirstOrDefaultAsync<PaymentRecord>(selectQuery, parameters);
+            return result;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error querying payment {CorrelationId}", correlationId);
+            throw;
+        }
+    }
+
 }

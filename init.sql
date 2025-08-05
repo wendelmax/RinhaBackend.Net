@@ -1,7 +1,8 @@
-set max_parallel_workers_per_gather = 4;
+set max_parallel_workers_per_gather = 2;
+
 
 CREATE UNLOGGED TABLE payments (
-    correlation_id uuid primary key ,
+    correlation_id uuid primary key,
     amount DECIMAL,
     processor int,
     requested_at TIMESTAMPTZ
