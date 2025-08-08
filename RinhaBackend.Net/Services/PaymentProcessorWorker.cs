@@ -12,17 +12,18 @@ public class PaymentProcessorWorker(
     IPaymentQueueService queueService,
     IServiceProvider serviceProvider,
     ILogger<PaymentProcessorWorker> logger,
-    IHttpClientFactory httpClientFactory)
+    IHttpClientFactory httpClientFactory,
+    ILoggerFactory loggerFactory)
     : BackgroundService
 {
-    private readonly Channel<PaymentPayload> _channel = Channel.CreateBounded<PaymentPayload>(new BoundedChannelOptions(100)
+    private readonly Channel<PaymentPayload> _channel = Channel.CreateBounded<PaymentPayload>(new BoundedChannelOptions(2048)
     {
         FullMode = BoundedChannelFullMode.Wait,
         SingleReader = false,
         SingleWriter = false
     });
     
-    private readonly SemaphoreSlim _semaphore = new(Environment.ProcessorCount * 2);
+    private readonly SemaphoreSlim _semaphore = new(Math.Max(8, Environment.ProcessorCount * 4));
     
     private readonly AtomicBoolean _defaultOk = new(true);
     private readonly AtomicBoolean _fallbackOk = new(true);
@@ -41,12 +42,14 @@ public class PaymentProcessorWorker(
     private const int MaxDelayMs = 2000;
     private const int HealthCheckCooldownMs = 5000; // 5 seconds
     
-    private readonly PaymentProcessor _defaultClient = new(httpClientFactory.CreateClient("PaymentProcessorDefault"));
-    private readonly PaymentProcessor _fallbackClient = new(httpClientFactory.CreateClient("PaymentProcessorFallback"));
+    private readonly PaymentProcessor _defaultClient = new(httpClientFactory.CreateClient("PaymentProcessorDefault"),
+        loggerFactory.CreateLogger<PaymentProcessor>());
+    private readonly PaymentProcessor _fallbackClient = new(httpClientFactory.CreateClient("PaymentProcessorFallback"),
+        loggerFactory.CreateLogger<PaymentProcessor>());
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        logger.LogInformation("PaymentProcessorWorker started with {ProcessorCount} processors", Environment.ProcessorCount);
+        
         
         var tasks = new List<Task>();
         
@@ -59,7 +62,7 @@ public class PaymentProcessorWorker(
         
         await Task.WhenAll(tasks);
         
-        logger.LogInformation("PaymentProcessorWorker stopped");
+        
     }
 
     private async Task ConsumeExternalQueueAsync(CancellationToken stoppingToken)
@@ -81,7 +84,7 @@ public class PaymentProcessorWorker(
                 }
                 else
                 {
-                    await Task.Delay(1, stoppingToken);
+                    await Task.Delay(5, stoppingToken);
                 }
             }
             catch (OperationCanceledException)
@@ -90,7 +93,7 @@ public class PaymentProcessorWorker(
             }
             catch (Exception ex)
             {
-                logger.LogError(ex, "Error consuming external queue");
+                
                 await Task.Delay(1, stoppingToken);
             }
         }
@@ -103,27 +106,23 @@ public class PaymentProcessorWorker(
         await foreach (var payload in _channel.Reader.ReadAllAsync(stoppingToken))
         {
             await _semaphore.WaitAsync(stoppingToken);
-            
-            _ = Task.Run(async () =>
+            try
             {
-                try
+                await ProcessPayload(payload, stoppingToken);
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "Critical error processing payload {CorrelationId}", payload.CorrelationId);
+                if (payload.ShouldRetry)
                 {
-                    await ProcessPayload(payload, stoppingToken);
+                    var retryPayload = payload.IncrementRetry();
+                    queueService.Enqueue(retryPayload);
                 }
-                catch (Exception ex)
-                {
-                    logger.LogError(ex, "Critical error processing payload {CorrelationId}", payload.CorrelationId);
-                    if (payload.ShouldRetry)
-                    {
-                        var retryPayload = payload.IncrementRetry();
-                        queueService.Enqueue(retryPayload);
-                    }
-                }
-                finally
-                {
-                    _semaphore.Release();
-                }
-            }, stoppingToken);
+            }
+            finally
+            {
+                _semaphore.Release();
+            }
         }
     }
 
@@ -131,20 +130,10 @@ public class PaymentProcessorWorker(
     {
         try
         {
-            logger.LogInformation("Processing payment {CorrelationId} with amount {Amount}", payload.CorrelationId, payload.Amount);
             
-            // Check if payment was already processed in database
-            using var checkScope = serviceProvider.CreateScope();
-            var checkRepository = checkScope.ServiceProvider.GetRequiredService<PaymentRepository>();
-            var existingPayment = await checkRepository.GetByCorrelationIdAsync(payload.CorrelationId);
-            if (existingPayment is not null)
-            {
-                logger.LogInformation("Payment {CorrelationId} was already processed, skipping", payload.CorrelationId);
-                return;
-            }
             
             var processor = await TryProcessWithResilience(payload, cancellationToken);
-            logger.LogDebug("Processor result for {CorrelationId}: {Processor}", payload.CorrelationId, processor);
+            
             
             if (processor is not null)
             {
@@ -154,16 +143,16 @@ public class PaymentProcessorWorker(
                 var inserted = await repository.InsertAsync(payload, processor.Value);
                 if (inserted)
                 {
-                    logger.LogInformation("Payment processed successfully with {Processor} for {CorrelationId}", processor, payload.CorrelationId);
+                    
                 }
                 else
                 {
-                    logger.LogInformation("Payment {CorrelationId} was already processed, skipping", payload.CorrelationId);
+                    
                 }
             }
             else
             {
-                logger.LogWarning("No processor available for payment {CorrelationId}, attempting to insert with fallback processor", payload.CorrelationId);
+                
                 
                 using var scope = serviceProvider.CreateScope();
                 var repository = scope.ServiceProvider.GetRequiredService<PaymentRepository>();
@@ -171,28 +160,35 @@ public class PaymentProcessorWorker(
                 var inserted = await repository.InsertAsync(payload, ProcessorType.Fallback);
                 if (inserted)
                 {
-                    logger.LogInformation("Payment inserted with fallback processor for {CorrelationId}", payload.CorrelationId);
+                    
                 }
                 else
                 {
-                    logger.LogInformation("Payment {CorrelationId} was already processed, skipping", payload.CorrelationId);
+                    
                 }
             }
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "Error processing payload {CorrelationId}", payload.CorrelationId);
+            
             if (payload.ShouldRetry)
             {
                 var retryPayload = payload.IncrementRetry();
-                logger.LogWarning("Re-queueing payment {CorrelationId} for retry (attempt {RetryCount}/{MaxRetries})", 
-                    payload.CorrelationId, retryPayload.RetryCount, PaymentPayload.MaxRetries);
+                
                 queueService.Enqueue(retryPayload);
             }
             else
             {
-                logger.LogError("Payment {CorrelationId} failed after {MaxRetries} attempts, giving up", 
-                    payload.CorrelationId, PaymentPayload.MaxRetries);
+                try
+                {
+                    using var scope = serviceProvider.CreateScope();
+                    var repository = scope.ServiceProvider.GetRequiredService<PaymentRepository>();
+                    await repository.InsertAsync(payload, ProcessorType.Fallback);
+                }
+                catch
+                {
+                    // swallow as we are in a best-effort fallback on final retry
+                }
             }
         }
     }
@@ -214,8 +210,7 @@ public class PaymentProcessorWorker(
             if (retryCount < maxRetries)
             {
                 var delay = Math.Min(BaseDelayMs * (int)Math.Pow(2, retryCount - 1), MaxDelayMs);
-                logger.LogDebug("Retrying payment {CorrelationId} in {Delay}ms (attempt {RetryCount}/{MaxRetries})", 
-                    payload.CorrelationId, delay, retryCount, maxRetries);
+                
                 await Task.Delay(delay, cancellationToken);
             }
         }
@@ -229,63 +224,63 @@ public class PaymentProcessorWorker(
         {
             try
             {
-                logger.LogDebug("Attempting to process payment {CorrelationId} with default processor", payload.CorrelationId);
+                
                 var result = await _defaultClient.ProcessAsync(payload);
-                logger.LogDebug("Default processor result for {CorrelationId}: {Result}", payload.CorrelationId, result);
+                
                 
                 if (result)
                 {
                     _defaultFailures.Reset();
-                    logger.LogInformation("Default processor succeeded for {CorrelationId}", payload.CorrelationId);
+                    
                     return ProcessorType.Default;
                 }
 
-                logger.LogWarning("Default processor returned false for {CorrelationId}", payload.CorrelationId);
+                
                 await HandleProcessorFailure(_defaultClient, _defaultOk, _defaultFailures, "Default", cancellationToken);
             }
             catch (Exception ex)
             {
-                logger.LogWarning(ex, "Default processor failed for {CorrelationId}", payload.CorrelationId);
+                
                 await HandleProcessorFailure(_defaultClient, _defaultOk, _defaultFailures, "Default", cancellationToken);
             }
         }
         else
         {
-            logger.LogDebug("Default processor is marked as unhealthy, skipping for {CorrelationId}", payload.CorrelationId);
+            
         }
 
         if (_fallbackOk.Value)
         {
             try
             {
-                logger.LogDebug("Attempting to process payment {CorrelationId} with fallback processor", payload.CorrelationId);
+                
                 var result = await _fallbackClient.ProcessAsync(payload);
-                logger.LogDebug("Fallback processor result for {CorrelationId}: {Result}", payload.CorrelationId, result);
+                
                 
                 if (result)
                 {
                     _fallbackFailures.Reset();
-                    logger.LogInformation("Fallback processor succeeded for {CorrelationId}", payload.CorrelationId);
+                    
                     return ProcessorType.Fallback;
                 }
 
-                logger.LogWarning("Fallback processor returned false for {CorrelationId}", payload.CorrelationId);
+                
                 await HandleProcessorFailure(_fallbackClient, _fallbackOk, _fallbackFailures, "Fallback", cancellationToken);
             }
             catch (Exception ex)
             {
-                logger.LogWarning(ex, "Fallback processor failed for {CorrelationId}", payload.CorrelationId);
+                
                 await HandleProcessorFailure(_fallbackClient, _fallbackOk, _fallbackFailures, "Fallback", cancellationToken);
             }
         }
         else
         {
-            logger.LogDebug("Fallback processor is marked as unhealthy, skipping for {CorrelationId}", payload.CorrelationId);
+            
         }
 
         if (!_defaultOk.Value && !_fallbackOk.Value)
         {
-            logger.LogWarning("Both processors are unhealthy for {CorrelationId}, waiting for recovery", payload.CorrelationId);
+            
             await WaitForHealthyProcessor(cancellationToken);
         }
 
@@ -337,7 +332,7 @@ public class PaymentProcessorWorker(
 
     private async Task WaitForHealthyProcessor(CancellationToken cancellationToken)
     {
-        logger.LogWarning("Both processors are unhealthy, waiting for recovery...");
+        
         
         while (!_defaultOk.Value && !_fallbackOk.Value && !cancellationToken.IsCancellationRequested)
         {
@@ -365,12 +360,11 @@ public class PaymentProcessorWorker(
                                 {
                                     _defaultOk.Value = true;
                                     _defaultFailures.Reset();
-                                    logger.LogInformation("Default processor recovered via health check");
                                 }
                             }
                             catch (Exception ex)
                             {
-                                logger.LogDebug(ex, "Default health check failed during recovery wait");
+                                
                             }
                             finally
                             {
@@ -395,12 +389,11 @@ public class PaymentProcessorWorker(
                                 {
                                     _fallbackOk.Value = true;
                                     _fallbackFailures.Reset();
-                                    logger.LogInformation("Fallback processor recovered via health check");
                                 }
                             }
                             catch (Exception ex)
                             {
-                                logger.LogDebug(ex, "Fallback health check failed during recovery wait");
+                                
                             }
                             finally
                             {
@@ -413,7 +406,7 @@ public class PaymentProcessorWorker(
             }
             catch (Exception ex)
             {
-                logger.LogDebug(ex, "Health check coordination failed during recovery wait");
+                
             }
         }
     }

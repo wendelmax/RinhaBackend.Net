@@ -9,3 +9,4 @@ CREATE UNLOGGED TABLE payments (
 );
 
 CREATE INDEX payments_requested_at ON payments (requested_at);
+CREATE INDEX payments_requested_at_processor ON payments (requested_at, processor);

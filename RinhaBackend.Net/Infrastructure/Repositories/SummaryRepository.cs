@@ -13,7 +13,7 @@ public sealed class SummaryRepository(IDbConnection connection, ILogger<SummaryR
                                         FROM payments
                                         WHERE processor IS NOT NULL
                                         AND requested_at >= @From
-                                        AND requested_at <= @To
+                                        AND requested_at < @To
                                         GROUP BY processor;
                                     """;
 
@@ -28,35 +28,34 @@ public sealed class SummaryRepository(IDbConnection connection, ILogger<SummaryR
     {
         try
         {
-            logger.LogInformation("Executing summary query from {From} to {To}", from, to);
-
-            IEnumerable<dynamic> rows;
+            IEnumerable<(int processor, decimal totalamount, long totalrequests)> rows;
             
+            if (connection.State != ConnectionState.Open)
+            {
+                connection.Open();
+            }
+
             if (from.HasValue && to.HasValue)
             {
                 var parameters = new DynamicParameters();
-                parameters.Add("@From", from.Value.UtcDateTime, DbType.DateTime);
-                parameters.Add("@To", to.Value.UtcDateTime, DbType.DateTime);
-                rows = await connection.QueryAsync(SummaryQueryWithRange, parameters, commandTimeout: 30);
+                parameters.Add("@From", from.Value, DbType.DateTimeOffset);
+                parameters.Add("@To", to.Value, DbType.DateTimeOffset);
+                rows = await connection.QueryAsync<(int processor, decimal totalamount, long totalrequests)>(SummaryQueryWithRange, parameters, commandTimeout: 15);
             }
             else
             {
-                rows = await connection.QueryAsync(SummaryQueryAll, commandTimeout: 30);
+                rows = await connection.QueryAsync<(int processor, decimal totalamount, long totalrequests)>(SummaryQueryAll, commandTimeout: 15);
             }
 
-            var enumerable = rows as dynamic[] ?? rows.ToArray();
-            logger.LogInformation("Query returned {RowCount} rows", enumerable.Length);
+            var enumerable = rows as (int processor, decimal totalamount, long totalrequests)[] ?? rows.ToArray();
 
             var summary = new Summary();
 
             foreach (var row in enumerable)
             {
-                var processorValue = Convert.ToInt32(row.processor);
-                var processor = processorValue == 0 ? ProcessorType.Default : ProcessorType.Fallback;
-                var totalAmount = (decimal)row.totalamount;
-                var totalRequests = (long)row.totalrequests;
-
-                logger.LogInformation("ProcessorXPTO {Processor}", processor);
+                var processor = row.processor == 0 ? ProcessorType.Default : ProcessorType.Fallback;
+                var totalAmount = row.totalamount;
+                var totalRequests = row.totalrequests;
 
                 var detail = new ProcessorSummary
                 {
@@ -67,12 +66,10 @@ public sealed class SummaryRepository(IDbConnection connection, ILogger<SummaryR
                 summary.Processors[processor] = detail;
             }
 
-            logger.LogInformation("Summary created successfully with {ProcessorCount} processors", summary.Processors.Count);
             return summary;
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "Database query failed for range {From} to {To}", from, to);
             throw new InvalidOperationException($"Database query failed: {ex.Message}", ex);
         }
     }

@@ -5,7 +5,7 @@ namespace RinhaBackend.Net.Services;
 
 public class PaymentQueueService : IPaymentQueueService
 {
-    private readonly Channel<PaymentPayload> _channel = Channel.CreateBounded<PaymentPayload>(new BoundedChannelOptions(10000)
+    private readonly Channel<PaymentPayload> _channel = Channel.CreateBounded<PaymentPayload>(new BoundedChannelOptions(20000)
     {
         FullMode = BoundedChannelFullMode.Wait,
         SingleReader = false,

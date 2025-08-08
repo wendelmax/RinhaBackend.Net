@@ -1,25 +1,33 @@
 using RinhaBackend.Net.Models.Payloads;
 using System.Text.Json;
+using RinhaBackend.Net.Serialization.Models;
+using RinhaBackend.Net.Serialization;
+using System.Net.Http.Json;
 
 
 namespace RinhaBackend.Net.Infrastructure.Clients;
 
-public class PaymentProcessor(HttpClient httpClient) : IPaymentProcessorClient
+public class PaymentProcessor(HttpClient httpClient, ILogger<PaymentProcessor> logger) : IPaymentProcessorClient
 {
-    ILogger<PaymentProcessor> logger = new LoggerFactory().CreateLogger<PaymentProcessor>();
     public async Task<bool> ProcessAsync(PaymentPayload payload, CancellationToken cancellationToken = default)
     {
-        // Create a new payload with EffectiveRequestedAt instead of nullable RequestedAt
-        var requestPayload = new
+        var requestPayload = new PaymentRequestDto
         {
-            correlationId = payload.CorrelationId,
-            amount = payload.Amount,
-            requestedAt = payload.EffectiveRequestedAt
+            CorrelationId = payload.CorrelationId,
+            Amount = payload.Amount,
+            RequestedAt = payload.EffectiveRequestedAt
         };
+
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/payments")
+        {
+            Content = JsonContent.Create(requestPayload, options: new JsonSerializerOptions
+            {
+                TypeInfoResolver = AppJsonSerializerContext.Default
+            })
+        };
+
+        using var response = await httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
         
-        var response = await httpClient.PostAsJsonAsync("/payments", requestPayload, cancellationToken);
-        logger.LogInformation("Payment processor response: {StatusCode} for {CorrelationId}", 
-            response.StatusCode, payload.CorrelationId);
         return response.IsSuccessStatusCode;
     }
 
