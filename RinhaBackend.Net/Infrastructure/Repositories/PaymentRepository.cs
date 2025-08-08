@@ -6,9 +6,8 @@ using RinhaBackend.Net.Models.Records;
 
 namespace RinhaBackend.Net.Infrastructure.Repositories;
 
-public sealed class PaymentRepository(IDbConnection connection)
+public sealed class PaymentRepository(IDbConnection connection, ILogger<PaymentRepository> logger)
 {
-    private readonly ILogger<PaymentRepository> _logger = new LoggerFactory().CreateLogger<PaymentRepository>();
     
     public async Task<bool> InsertAsync(PaymentPayload payment, ProcessorType processor)
     {
@@ -26,36 +25,28 @@ public sealed class PaymentRepository(IDbConnection connection)
         parameters.Add("@Processor", processor);
         parameters.Add("@RequestedAt", utcDateTime);
         
-        _logger.LogInformation("Attempting to insert payment {CorrelationId} with processor {Processor} and requestedAt {RequestedAt} (UTC: {UtcDateTime})", 
-            payment.CorrelationId, processor, payment.EffectiveRequestedAt, utcDateTime);
+        
         
         try
         {
             if (connection.State != ConnectionState.Open)
             {
-                _logger.LogInformation("Opening database connection for payment {CorrelationId}", payment.CorrelationId);
                 connection.Open();
             }
             
             var affectedRows = await connection.ExecuteAsync(insertQuery, parameters);
-            _logger.LogInformation("SQL execution completed for {CorrelationId}, affected rows: {AffectedRows}", 
-                payment.CorrelationId, affectedRows);
             
             if (affectedRows > 0)
             {
-                _logger.LogInformation("Payment inserted successfully: {CorrelationId} with {Processor}", 
-                    payment.CorrelationId, processor);
                 return true;
             }
             else
             {
-                _logger.LogWarning("Payment already exists, skipping: {CorrelationId}", payment.CorrelationId);
                 return false;
             }
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error inserting payment {CorrelationId}", payment.CorrelationId);
             throw;
         }
     }
@@ -83,7 +74,6 @@ public sealed class PaymentRepository(IDbConnection connection)
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error querying payment {CorrelationId}", correlationId);
             throw;
         }
     }

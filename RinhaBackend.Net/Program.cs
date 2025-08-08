@@ -7,6 +7,7 @@ using Npgsql;
 using RinhaBackend.Net.Models.Enums;
 using RinhaBackend.Net.Models.Payloads;
 using RinhaBackend.Net.Serialization;
+using Microsoft.Extensions.Logging;
 
 
 var builder = WebApplication.CreateBuilder(args);
@@ -16,13 +17,18 @@ builder.Services.ConfigureHttpJsonOptions(options =>
     options.SerializerOptions.TypeInfoResolverChain.Insert(0, AppJsonSerializerContext.Default);
 });
 
+builder.Logging.ClearProviders();
+builder.Logging.SetMinimumLevel(LogLevel.None);
+
 builder.Services.AddScoped<IDbConnection>(sp =>
 {
     var connStr = sp.GetRequiredService<IConfiguration>().GetConnectionString("PostgresConnection");
-    var logger = sp.GetRequiredService<ILogger<Program>>();
-    logger.LogInformation("Creating database connection factory");
     
-    return new NpgsqlConnection(connStr);
+    var builder = new NpgsqlConnectionStringBuilder(connStr)
+    {
+        Pooling = true
+    };
+    return new NpgsqlConnection(builder.ConnectionString);
 });
 
 builder.Services.AddScoped<PaymentRepository>();
@@ -36,6 +42,13 @@ builder.Services.AddHttpClient("PaymentProcessorDefault", client =>
     var baseUrl = builder.Configuration["PaymentProcessorDefault:BaseUrl"] ?? "http://payment-processor-default:8080";
     client.BaseAddress = new Uri(baseUrl);
     client.Timeout = TimeSpan.FromSeconds(60);
+}).ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+{
+    PooledConnectionLifetime = TimeSpan.FromMinutes(2),
+    PooledConnectionIdleTimeout = TimeSpan.FromSeconds(15),
+    MaxConnectionsPerServer = 256,
+    EnableMultipleHttp2Connections = true,
+    AutomaticDecompression = System.Net.DecompressionMethods.None
 });
 
 builder.Services.AddHttpClient("PaymentProcessorFallback", client =>
@@ -43,21 +56,25 @@ builder.Services.AddHttpClient("PaymentProcessorFallback", client =>
     var baseUrl = builder.Configuration["PaymentProcessorFallback:BaseUrl"] ?? "http://payment-processor-fallback:8080";
     client.BaseAddress = new Uri(baseUrl);
     client.Timeout = TimeSpan.FromSeconds(30);
+}).ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+{
+    PooledConnectionLifetime = TimeSpan.FromMinutes(2),
+    PooledConnectionIdleTimeout = TimeSpan.FromSeconds(15),
+    MaxConnectionsPerServer = 256,
+    EnableMultipleHttp2Connections = true,
+    AutomaticDecompression = System.Net.DecompressionMethods.None
 });
 
 builder.Services.AddHttpClient<IPaymentProcessorClient, PaymentProcessor>();
 
 var app = builder.Build();
 
-// Add rate limiting
-app.Use(async (context, next) =>
+// Prefer Kestrel with higher request queue and HTTP/1.1 keep-alive tuning
+app.Lifetime.ApplicationStarted.Register(() =>
 {
-    // Add performance headers
-    context.Response.Headers["X-Response-Time"] = DateTimeOffset.UtcNow.ToString("O");
-    context.Response.Headers["X-Powered-By"] = "RinhaBackend.NET";
-    
-    await next();
 });
+
+// Removed per-request header middleware to avoid overhead
 
 app.MapGet("/health", () => "healthy");
 
@@ -73,44 +90,36 @@ app.MapGet("/metrics", (IServiceProvider serviceProvider) =>
         {
             totalAllocated = GC.GetTotalMemory(false),
             heapSize = memoryInfo.HeapSizeBytes,
-            totalMemory = GC.GetTotalMemory(true)
+            totalMemory = memoryInfo.TotalCommittedBytes
         }
     });
 });
 
-app.MapGet("/payments-summary", async (DateTimeOffset? from, DateTimeOffset? to, IServiceProvider serviceProvider, ILogger<Program> logger) =>
+app.MapGet("/payments-summary", async (DateTimeOffset? from, DateTimeOffset? to, IServiceProvider serviceProvider) =>
 {
     try
     {
         if (from.HasValue && to.HasValue && from.Value >= to.Value)
         {
-            logger.LogWarning("Invalid date range: from {From} to {To}", from, to);
             return Results.BadRequest(new { error = "From date must be before To date" });
         }
         
         using var scope = serviceProvider.CreateScope();
         var summaryService = scope.ServiceProvider.GetRequiredService<SummaryService>();
-        
-        logger.LogInformation("Summary request received from {From} to {To}", from, to);
-        
         var result = await summaryService.GetSummaryByRange(from, to);
         
         return Results.Ok(result);
     }
     catch (Exception ex)
     {
-        logger.LogError(ex, "Error processing summary request from {From} to {To}", from, to);
         return Results.StatusCode(500);
     }
 });
 
-app.MapPost("/payments-test-datetime", async (PaymentPayload request, IServiceProvider serviceProvider, ILogger<Program> logger) =>
+app.MapPost("/payments-test-datetime", async (PaymentPayload request, IServiceProvider serviceProvider) =>
 {
     try
     {
-        logger.LogInformation("Testing DateTime conversion for payment {CorrelationId} with requestedAt {RequestedAt}", 
-            request.CorrelationId, request.RequestedAt);
-        
         return Results.Ok(new { 
             success = true, 
             correlationId = request.CorrelationId,
@@ -123,43 +132,46 @@ app.MapPost("/payments-test-datetime", async (PaymentPayload request, IServicePr
     }
     catch (Exception ex)
     {
-        logger.LogError(ex, "Error testing DateTime conversion for {CorrelationId}", request.CorrelationId);
         return Results.StatusCode(500);
     }
 });
 
-app.MapPost("/payments", (PaymentPayload request, IPaymentQueueService queueService, ILogger<Program> logger) =>
+app.MapPost("/payments", (PaymentPayload request, IPaymentQueueService queueService) =>
 {
     try
     {
         if (!request.IsValid())
         {
             var errors = request.GetValidationErrors().ToList();
-            logger.LogWarning("Invalid payment request: {CorrelationId}, Errors: {Errors}", request.CorrelationId, string.Join(", ", errors));
             return Results.BadRequest(new { errors });
         }
-        
-        queueService.Enqueue(request);
-        logger.LogInformation("Payment enqueued for processing: {CorrelationId} with amount {Amount}", request.CorrelationId, request.Amount);
+
+        var payload = request.RequestedAt.HasValue
+            ? request
+            : new PaymentPayload
+            {
+                CorrelationId = request.CorrelationId,
+                Amount = request.Amount,
+                RequestedAt = DateTimeOffset.UtcNow,
+                RetryCount = request.RetryCount
+            };
+
+        queueService.Enqueue(payload);
         return Results.Accepted();
     }
     catch (Exception ex)
     {
-        logger.LogError(ex, "Error processing payment request with correlation ID: {CorrelationId}", request.CorrelationId);
         return Results.StatusCode(500);
     }
 });
 
-app.MapPost("/purge-payments", async (IServiceProvider serviceProvider, ILogger<Program> logger) =>
+app.MapPost("/purge-payments", async (IServiceProvider serviceProvider) =>
 {
     try
     {
         using var scope = serviceProvider.CreateScope();
         var connection = scope.ServiceProvider.GetRequiredService<IDbConnection>();
         var summaryService = scope.ServiceProvider.GetRequiredService<SummaryService>();
-        
-        logger.LogInformation("Purge payments request received");
-        
         const string purgeQuery = "DELETE FROM payments";
         
         if (connection.State != ConnectionState.Open)
@@ -168,9 +180,6 @@ app.MapPost("/purge-payments", async (IServiceProvider serviceProvider, ILogger<
         }
         
         var affectedRows = await connection.ExecuteAsync(purgeQuery);
-        
-        logger.LogInformation("Purged {AffectedRows} payment records", affectedRows);
-        
         return Results.Ok(new { 
             message = $"Successfully purged {affectedRows} payment records", 
             affectedRows,
@@ -179,7 +188,6 @@ app.MapPost("/purge-payments", async (IServiceProvider serviceProvider, ILogger<
     }
     catch (Exception ex)
     {
-        logger.LogError(ex, "Error purging payments");
         return Results.StatusCode(500);
     }
 });

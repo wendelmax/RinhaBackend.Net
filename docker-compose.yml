@@ -31,7 +31,10 @@ services:
     environment:
       - ASPNETCORE_ENVIRONMENT=Production
       - ASPNETCORE_HTTP_PORTS=5000
-      - ConnectionStrings__PostgresConnection=Host=postgres;Database=rinha_backend;Username=rinha_user;Password=rinha_password;Pooling=true;Maximum Pool Size=20;Multiplexing=false;Timeout=15;Command Timeout=15;Cancellation Timeout=-1;No Reset On Close=true;Max Auto Prepare=20;Auto Prepare Min Usages=1
+      - DOTNET_TieredPGO=1
+      - DOTNET_TC_QuickJitForLoops=1
+      - DOTNET_ReadyToRun=1
+      - ConnectionStrings__PostgresConnection=Host=postgres;Database=rinha_backend;Username=rinha_user;Password=rinha_password;Pooling=true;Maximum Pool Size=64;Multiplexing=true;Timeout=15;Command Timeout=10;Cancellation Timeout=-1;No Reset On Close=true;Max Auto Prepare=20;Auto Prepare Min Usages=1
       - PaymentProcessorDefault__BaseUrl=http://payment-processor-default:8080
       - PaymentProcessorFallback__BaseUrl=http://payment-processor-fallback:8080
     depends_on:
