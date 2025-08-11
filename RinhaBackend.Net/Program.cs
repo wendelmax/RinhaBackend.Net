@@ -78,24 +78,9 @@ app.Lifetime.ApplicationStarted.Register(() =>
 
 app.MapGet("/health", () => "healthy");
 
-app.MapGet("/metrics", (IServiceProvider serviceProvider) =>
-{
-    var memoryInfo = GC.GetGCMemoryInfo();
-    
-    return Results.Ok(new
-    {
-        timestamp = DateTimeOffset.UtcNow,
-        uptime = Environment.TickCount64,
-        memory = new
-        {
-            totalAllocated = GC.GetTotalMemory(false),
-            heapSize = memoryInfo.HeapSizeBytes,
-            totalMemory = memoryInfo.TotalCommittedBytes
-        }
-    });
-});
 
-app.MapGet("/payments-summary", async (DateTimeOffset? from, DateTimeOffset? to, IServiceProvider serviceProvider) =>
+
+app.MapGet("/payments-summary", async (DateTimeOffset? from, DateTimeOffset? to, SummaryService summaryService) =>
 {
     try
     {
@@ -104,8 +89,6 @@ app.MapGet("/payments-summary", async (DateTimeOffset? from, DateTimeOffset? to,
             return Results.BadRequest(new { error = "From date must be before To date" });
         }
         
-        using var scope = serviceProvider.CreateScope();
-        var summaryService = scope.ServiceProvider.GetRequiredService<SummaryService>();
         var result = await summaryService.GetSummaryByRange(from, to);
         
         return Results.Ok(result);
@@ -116,25 +99,6 @@ app.MapGet("/payments-summary", async (DateTimeOffset? from, DateTimeOffset? to,
     }
 });
 
-app.MapPost("/payments-test-datetime", async (PaymentPayload request, IServiceProvider serviceProvider) =>
-{
-    try
-    {
-        return Results.Ok(new { 
-            success = true, 
-            correlationId = request.CorrelationId,
-            requestedAt = request.RequestedAt,
-            effectiveRequestedAt = request.EffectiveRequestedAt,
-            requestedAtUtc = request.EffectiveRequestedAt.UtcDateTime,
-            isValid = request.IsValidRequestedAt,
-            message = "DateTime test completed - payment will be processed by Worker"
-        });
-    }
-    catch (Exception ex)
-    {
-        return Results.StatusCode(500);
-    }
-});
 
 app.MapPost("/payments", (PaymentPayload request, IPaymentQueueService queueService) =>
 {

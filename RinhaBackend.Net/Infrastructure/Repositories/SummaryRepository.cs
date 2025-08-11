@@ -6,7 +6,7 @@ using RinhaBackend.Net.Models.Responses;
 
 namespace RinhaBackend.Net.Infrastructure.Repositories;
 
-public sealed class SummaryRepository(IDbConnection connection, ILogger<SummaryRepository> logger)
+public sealed class SummaryRepository(IDbConnection connection)
 {
     private const string SummaryQueryWithRange = """
                                         SELECT processor, SUM(amount) AS totalamount, COUNT(*) AS totalrequests

@@ -6,7 +6,7 @@ using RinhaBackend.Net.Models.Records;
 
 namespace RinhaBackend.Net.Infrastructure.Repositories;
 
-public sealed class PaymentRepository(IDbConnection connection, ILogger<PaymentRepository> logger)
+public sealed class PaymentRepository(IDbConnection connection)
 {
     
     public async Task<bool> InsertAsync(PaymentPayload payment, ProcessorType processor)
